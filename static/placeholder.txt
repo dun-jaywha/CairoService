@@ -1,0 +1,3 @@
+# Static Files Directory
+# This directory is for nginx to serve static assests
+# Currently empty initially - StreamLit handles its own assets??

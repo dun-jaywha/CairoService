@@ -1,0 +1,20 @@
+services:
+  svg-pdf-converter:
+    build: .
+    container_name: svg-pdf-converter
+    ports:
+      - "80:80"
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./converted:/app/converted
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_PATH=/app/data/svg_pdf_converter.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

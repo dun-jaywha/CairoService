@@ -1,0 +1,3 @@
+# Templates directory
+# This directory is for Flask templates if needed in the future
+# Currently empty - using REST API only
