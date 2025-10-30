@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from contextlib import contextmanager
 
-DATABASE_PATH = '/app/svg_pdf_converter.db'
+DATABASE_PATH = 'C:\\SVGData\\files.db' # '/app/svg_pdf_converter.db'
 
 def init_database():
     """Initialize the SQLite database with required tables."""
@@ -16,6 +16,7 @@ def init_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_number INTEGER NOT NULL,
                 line_number INTEGER NOT NULL,
+                sequence_number INTEGER DEFAULT 1,
                 original_filename TEXT NOT NULL,
                 svg_path TEXT NOT NULL,
                 pdf_path TEXT,
@@ -23,7 +24,7 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 converted_at TIMESTAMP,
                 file_size INTEGER,
-                UNIQUE(order_number, line_number)
+                UNIQUE(order_number, line_number, sequence_number)
             )
         ''')
         
@@ -31,6 +32,11 @@ def init_database():
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_order_line 
             ON files (order_number, line_number)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_order_line_seq
+            ON files (order_number, line_number, sequence_number)
         ''')
         
         conn.commit()
@@ -45,14 +51,26 @@ def get_db_connection():
     finally:
         conn.close()
 
-def insert_file_record(order_number, line_number, original_filename, svg_path, file_size):
+def get_next_sequence_number(order_number, line_number):
+    """Get the next available sequence number for an order/line combination."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT MAX(sequence_number) FROM files 
+            WHERE order_number = ? AND line_number = ?
+        ''', (order_number, line_number))
+        result = cursor.fetchone()
+        max_seq = result[0] if result[0] is not None else 0
+        return max_seq + 1
+
+def insert_file_record(order_number, line_number, original_filename, svg_path, file_size, sequence_number):
     """Insert a new file record into the database."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO files (order_number, line_number, original_filename, svg_path, file_size)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (order_number, line_number, original_filename, svg_path, file_size))
+            INSERT INTO files (order_number, line_number, original_filename, svg_path, file_size, sequence_number)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (order_number, line_number, original_filename, svg_path, file_size, sequence_number))
         conn.commit()
         return cursor.lastrowid
 
@@ -73,9 +91,20 @@ def get_file_by_order_line(order_number, line_number):
         cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM files 
-            WHERE order_number = ? AND line_number = ?
+            WHERE order_number = ? AND line_number = ? AND MAX(sequence_number)
         ''', (order_number, line_number))
         return cursor.fetchone()
+
+def get_all_files_by_order_line(order_number, line_number):
+    """Retrieve all file versions for a specific order number and line number."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM files 
+            WHERE order_number = ? AND line_number = ?
+            ORDER BY sequence_number ASC
+        ''', (order_number, line_number))
+        return cursor.fetchall()
 
 def get_files_by_order(order_number):
     """Retrieve all files for a specific order number."""
