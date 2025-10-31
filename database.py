@@ -41,6 +41,9 @@ def init_database():
         
         conn.commit()
 
+        # Initialize merged files table
+        init_merged_files_table()
+
 @contextmanager
 def get_db_connection():
     """Context manager for database connections."""
@@ -86,13 +89,24 @@ def update_file_conversion(file_id, pdf_path, status='converted'):
         conn.commit()
 
 def get_file_by_order_line(order_number, line_number):
-    """Retrieve file information by order number and line number."""
+    """Retrieve latest file information by order number and line number."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM files 
-            WHERE order_number = ? AND line_number = ? AND MAX(sequence_number)
+            WHERE order_number = ? AND line_number = ?
+            AND sequence_number = (SELECT MAX(sequence_number) FROM files)
         ''', (order_number, line_number))
+        return cursor.fetchone()
+    
+def get_file_by_order_line_seq(order_number, line_number, sequence_number):
+    """Retrieve sepcific file information by order, line, and sequence number."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM files 
+            WHERE order_number = ? AND line_number = ? AND sequence_number = ?
+        ''', (order_number, line_number, sequence_number))
         return cursor.fetchone()
 
 def get_all_files_by_order_line(order_number, line_number):
@@ -150,3 +164,107 @@ def delete_file_record(file_id):
         cursor.execute('DELETE FROM files WHERE id = ?', (file_id,))
         conn.commit()
         return cursor.rowcount > 0
+    
+def init_merged_files_table():
+    """Initialize the merged_files table for storing merged PDFs."""
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS merged_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_number INTEGER NOT NULL,
+                sequence_number INTEGER DEFAULT 1,
+                merged_pdf_path TEXT NOT NULL,
+                file_size INTEGER,
+                line_numbers TEXT NOT NULL,
+                file_count INTEGER NOT NULL,
+                status TEXT DEFAULT 'completed',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(order_number, sequence_number)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_merged_order 
+            ON merged_files (order_number)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_merged_order_seq
+            ON merged_files (order_number, sequence_number)
+        ''')
+        
+        conn.commit()
+
+def get_next_merged_sequence_number(order_number):
+    """Get the next available sequence number for a merged file."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT MAX(sequence_number) FROM merged_files 
+            WHERE order_number = ?
+        ''', (order_number,))
+        result = cursor.fetchone()
+        max_seq = result[0] if result[0] is not None else 0
+        return max_seq + 1
+
+def insert_merged_file_record(order_number, merged_pdf_path, file_size, line_numbers, file_count, sequence_number=None):
+    """Insert a new merged file record into the database."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        if sequence_number is None:
+            sequence_number = get_next_merged_sequence_number(order_number)
+        
+        # Convert line_numbers list to JSON string
+        import json
+        line_numbers_json = json.dumps(line_numbers)
+        
+        cursor.execute('''
+            INSERT INTO merged_files (order_number, sequence_number, merged_pdf_path, file_size, line_numbers, file_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (order_number, sequence_number, merged_pdf_path, file_size, line_numbers_json, file_count))
+        conn.commit()
+        return cursor.lastrowid
+
+def get_merged_file_by_order(order_number, sequence_number=None):
+    """Retrieve merged file by order number and optional sequence number."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if sequence_number is not None:
+            cursor.execute('''
+                SELECT * FROM merged_files 
+                WHERE order_number = ? AND sequence_number = ?
+            ''', (order_number, sequence_number))
+        else:
+            # Get the latest sequence if not specified
+            cursor.execute('''
+                SELECT * FROM merged_files 
+                WHERE order_number = ?
+                ORDER BY sequence_number DESC
+                LIMIT 1
+            ''', (order_number,))
+        return cursor.fetchone()
+
+def get_all_merged_files_by_order(order_number):
+    """Retrieve all merged file versions for a specific order number."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM merged_files 
+            WHERE order_number = ?
+            ORDER BY sequence_number DESC
+        ''', (order_number,))
+        return cursor.fetchall()
+
+def get_all_merged_files(limit=100, offset=0):
+    """Retrieve all merged files with pagination."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM merged_files 
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+        ''', (limit, offset))
+        return cursor.fetchall()
