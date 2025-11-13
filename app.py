@@ -14,8 +14,8 @@ from database import (
 app = Flask(__name__)
 CORS(app, origins="http://172.21.10.139:10000", methods=["GET", "POST"], allow_headers=["Content-Type", "Authorization"])
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', './uploads')
-app.config['CONVERTED_FOLDER'] = os.getenv('CONVERTED_FOLDER', './converted')
+app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', os.path.abspath('uploads'))
+app.config['CONVERTED_FOLDER'] = os.getenv('CONVERTED_FOLDER', os.path.abspath('converted'))
 
 # Ensure directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -70,6 +70,17 @@ def convert_svg_to_pdf(svg_path, pdf_path):
 def health_check():
     """Health check endpoint."""
     return jsonify({"status": "healthy", "service": "SVG to PDF Converter"}), 200
+pass
+
+@app.route('/images/<imgName>', methods=['GET'])
+def get_image(imgName):
+    """Serve static image files."""
+    try:
+        image_path = os.path.join('images', secure_filename(imgName))
+        return send_file(image_path, mimetype='image/png'), 200
+    except Exception as e:
+        return jsonify({"error": f"Server error: {str(e)}"}), 500   
+pass
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -87,15 +98,11 @@ def upload_file():
             svg_content = data.get('svg_content')
             order_number = data.get('order_number')
             line_number = data.get('line_number')
-            allow_duplicate = data.get('allow_duplicate', True)
+            drawing_type = data.get('drawing_type', 'LG')
             original_filename = data.get('filename', 'uploaded.svg')
             
             if not svg_content:
-                return jsonify({"error": "svg_content is required in JSON payload"}), 400
-            
-            # Convert allow_duplicate to boolean if string
-            if isinstance(allow_duplicate, str):
-                allow_duplicate = allow_duplicate.lower() == 'true'                
+                return jsonify({"error": "svg_content is required in JSON payload"}), 400  
         else:
             # Handle multipart form data (existing logic)
             if 'file' not in request.files:
@@ -104,7 +111,6 @@ def upload_file():
             file = request.files['file']
             order_number = request.form.get('order_number')
             line_number = request.form.get('line_number')
-            allow_duplicate = request.form.get('allow_duplicate', 'true').lower() == 'true'
             
             if file.filename == '':
                 return jsonify({"error": "No file selected"}), 400
@@ -132,22 +138,16 @@ def upload_file():
         if not (1 <= line_number <= 999):
             return jsonify({"error": "line_number must be between 1 and 999"}), 400
         
-        # Get next sequence number
-        sequence_number = get_next_sequence_number(order_number, line_number)
+        # Get next sequence number (1 for LG, 2 for U1 - will replace existing)
+        sequence_number = drawing_type == 'LG' and 1 or 2
         
-        print("Made it here where dupe bool is: ", allow_duplicate)
-        print("...\tsequence number is: ", sequence_number)
-        # Check if this would be a duplicate (sequence > 1)
-        if sequence_number > 1 and not allow_duplicate:
-            return jsonify({
-                "error": f"File already exists for order {order_number}, line {line_number}",
-                "existing_sequences": sequence_number - 1,
-                "hint": "Set allow_duplicate=true to upload a new version"
-            }), 409
+        # Check if file exists (for informational purposes only)
+        existing_file = get_file_by_order_line_seq(order_number, line_number, sequence_number)
+        is_replacement = existing_file is not None
         
         # Save SVG file
         filename = secure_filename(original_filename)
-        svg_filename = f"{order_number}_{line_number}_{sequence_number}_{filename}"
+        svg_filename = f"{filename}"
         svg_path = os.path.join(app.config['UPLOAD_FOLDER'], svg_filename)
         
         if is_json:
@@ -165,36 +165,54 @@ def upload_file():
         file_id = insert_file_record(order_number, line_number, filename, svg_path, file_size, sequence_number)
         
         # Convert to PDF
-        pdf_filename = f"{order_number}_{line_number}_{sequence_number}_{filename.rsplit('.', 1)[0]}.pdf"
+        pdf_filename = f"{filename.rsplit('.', 1)[0]}.pdf"
         pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
         
         if convert_svg_to_pdf(svg_path, pdf_path):
             update_file_conversion(file_id, pdf_path, 'converted')
             return jsonify({
-                "message": "File uploaded and converted successfully",
+                "message": "File uploaded and converted successfully" + (" (replaced existing)" if is_replacement else ""),
                 "file_id": file_id,
                 "order_number": order_number,
                 "line_number": line_number,
                 "sequence_number": sequence_number,
-                "is_duplicate": sequence_number > 1,
+                "is_replacement": is_replacement,
                 "pdf_available": True,
                 "upload_method": "json" if is_json else "multipart"
             }), 201
         else:
             update_file_conversion(file_id, None, 'error')
             return jsonify({
-                "message": "File uploaded but conversion failed",
+                "message": "File uploaded but conversion failed" + (" (replaced existing)" if is_replacement else ""),
                 "file_id": file_id,
                 "order_number": order_number,
                 "line_number": line_number,
                 "sequence_number": sequence_number,
-                "is_duplicate": sequence_number > 1,
+                "is_replacement": is_replacement,
                 "pdf_available": False,
                 "upload_method": "json" if is_json else "multipart"
             }), 500
             
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+@app.route('/api/routes', methods=['GET'])
+def list_routes():
+    """List all available API routes."""
+    routes = []
+    for rule in app.url_map.iter_rules():
+        if rule.methods is not None:
+            methods = ','.join(rule.methods)
+            routes.append({
+                "endpoint": rule.endpoint,
+                "methods": methods,
+                "route": str(rule)
+            })
+        pass
+    pass
+
+    return jsonify({"routes": routes}), 200
+pass
 
 @app.route('/file/<int:order_number>/<int:line_number>', methods=['GET'])
 @app.route('/file/<int:order_number>/<int:line_number>/<int:sequence_number>', methods=['GET'])

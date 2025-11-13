@@ -17,6 +17,7 @@ def init_database():
                 order_number INTEGER NOT NULL,
                 line_number INTEGER NOT NULL,
                 sequence_number INTEGER DEFAULT 1,
+                drawing_type TEXT NOT NULL DEFAULT 'LG',
                 original_filename TEXT NOT NULL,
                 svg_path TEXT NOT NULL,
                 pdf_path TEXT,
@@ -24,7 +25,7 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 converted_at TIMESTAMP,
                 file_size INTEGER,
-                UNIQUE(order_number, line_number, sequence_number)
+                UNIQUE(order_number DESC, line_number ASC, sequence_number, drawing_type ASC)
             )
         ''')
         
@@ -38,6 +39,8 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_order_line_seq
             ON files (order_number, line_number, sequence_number)
         ''')
+
+        # TODO: Create index for drawing type?
         
         conn.commit()
 
@@ -55,27 +58,45 @@ def get_db_connection():
         conn.close()
 
 def get_next_sequence_number(order_number, line_number):
-    """Get the next available sequence number for an order/line combination."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT MAX(sequence_number) FROM files 
-            WHERE order_number = ? AND line_number = ?
-        ''', (order_number, line_number))
-        result = cursor.fetchone()
-        max_seq = result[0] if result[0] is not None else 0
-        return max_seq + 1
+    """Always return 1 - sequencing disabled, files are replaced."""
+    return 1
 
-def insert_file_record(order_number, line_number, original_filename, svg_path, file_size, sequence_number):
-    """Insert a new file record into the database."""
+def insert_file_record(order_number, line_number, original_filename, svg_path, file_size, sequence_number=None):
+    """Insert or replace file record (always uses sequence 1)."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # Always use sequence 1 (replacement mode)
+        sequence_number = sequence_number or 1
+        drawing_type = sequence_number == 'LG' and 1 or 2
+        
+        # Check if record exists
         cursor.execute('''
-            INSERT INTO files (order_number, line_number, original_filename, svg_path, file_size, sequence_number)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (order_number, line_number, original_filename, svg_path, file_size, sequence_number))
-        conn.commit()
-        return cursor.lastrowid
+            SELECT id, svg_path, pdf_path FROM files 
+            WHERE order_number = ? AND line_number = ? AND sequence_number = ?
+        ''', (order_number, line_number, sequence_number))
+        
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update existing record
+            cursor.execute('''
+                UPDATE files 
+                SET original_filename = ?, svg_path = ?, file_size = ?, 
+                    status = 'uploaded', pdf_path = NULL, converted_at = NULL,
+                    created_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (original_filename, svg_path, file_size, existing['id']))
+            conn.commit()
+            return existing['id']
+        else:
+            # Insert new record
+            cursor.execute('''
+                INSERT INTO files (order_number, line_number, sequence_number, drawing_type, original_filename, svg_path, file_size)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (order_number, line_number, sequence_number, drawing_type, original_filename, svg_path, file_size))
+            conn.commit()
+            return cursor.lastrowid
 
 def update_file_conversion(file_id, pdf_path, status='converted'):
     """Update file record after successful conversion."""
@@ -89,13 +110,13 @@ def update_file_conversion(file_id, pdf_path, status='converted'):
         conn.commit()
 
 def get_file_by_order_line(order_number, line_number):
-    """Retrieve latest file information by order number and line number."""
+    """Retrieve LG file information by order number and line number."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM files 
             WHERE order_number = ? AND line_number = ?
-            AND sequence_number = (SELECT MAX(sequence_number) FROM files)
+            AND sequence_number = 1
         ''', (order_number, line_number))
         return cursor.fetchone()
     
